@@ -1,0 +1,19 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/cleanup-submissions",
+      "schedule": "0 2 */15 * *"
+    }
+  ],
+  "functions": {
+    "app/api/cron/cleanup-submissions/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/admin/manga-moderation/cleanup/route.ts": {
+      "maxDuration": 300
+    }
+  },
+  "env": {
+    "CRON_SECRET": "@cron_secret"
+  }
+}

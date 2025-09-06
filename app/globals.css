@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* твои глобальные стили ниже */
+
+
+/* фон всей страницы - только для темной темы /
+.dark {
+  background: linear-gradient(135deg, #111827 0%, #0d1422 50%, #0b0b0f 100%);
+  background-size: 400% 400%;
+  animation: gradientShift 100s linear infinite alternate;
+}
+
+/ светлая тема /
+.light {
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 50%, #e2e8f0 100%);
+  background-size: 400% 400%;
+  animation: gradientShift 100s linear infinite alternate;
+}
+
+/ анимация градиента /
+@keyframes gradientShift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .line-clamp-1 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+  }
+
+  .line-clamp-2 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+}
+
+/ Custom scrollbar для темной темы /
+.dark ::-webkit-scrollbar {
+  width: 6px;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 3px;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/ Custom scrollbar для светлой темы */
+.light ::-webkit-scrollbar {
+  width: 6px;
+}
+
+.light ::-webkit-scrollbar-track {
+  background: #e2e8f0;
+}
+
+.light ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+.light ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
