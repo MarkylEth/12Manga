@@ -25,31 +25,36 @@ export async function GET(req: NextRequest, { params }: Params) {
     parent_id: string | null
     username: string | null
     avatar_url: string | null
+    team_role: string | null
   }>(
     `
     select
-      c.id::text, 
-      c.post_id::text, 
-      c.user_id::text, 
-      c.content, 
-      c.created_at, 
+      c.id::text,
+      c.post_id::text,
+      c.user_id::text,
+      c.content,
+      c.created_at,
       c.updated_at,
       c.parent_id::text,
-      p.username, 
-      p.avatar_url
+      p.username,
+      p.avatar_url,
+      m.role as team_role                 -- ВАЖНО: роль в этой команде
     from team_post_comments c
-    left join profiles p on p.id = c.user_id
+    left join profiles p
+      on p.id = c.user_id
+    left join translator_team_members m
+      on m.team_id = $2 and m.user_id = c.user_id
     where c.post_id = $1::uuid
     order by c.created_at asc
-    limit $2 offset $3
+    limit $3 offset $4
     `,
-    [postId, limit, offset]
+    [postId, team.id, limit, offset]
   )
 
-  return NextResponse.json({ 
-    items: r.rows, 
-    nextOffset: offset + r.rows.length, 
-    limit 
+  return NextResponse.json({
+    items: r.rows,
+    nextOffset: offset + r.rows.length,
+    limit
   })
 }
 
@@ -61,7 +66,6 @@ export async function POST(req: NextRequest, { params }: Params) {
   const uid = await getViewerId(req)
   if (!uid) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
 
-  // Проверяем что пост принадлежит команде
   const postCheck = await query(
     'select 1 from team_posts where id = $1::uuid and team_id = $2',
     [postId, team.id]
@@ -73,38 +77,55 @@ export async function POST(req: NextRequest, { params }: Params) {
   const payload = await req.json().catch(() => ({} as any))
   const content = String(payload?.content ?? '').trim()
   const parent = payload?.parent_id ? String(payload.parent_id) : null
-  
-  if (!content) {
-    return NextResponse.json({ error: 'empty_content' }, { status: 400 })
-  }
 
-  if (content.length > 2000) {
-    return NextResponse.json({ error: 'content_too_long' }, { status: 400 })
-  }
+  if (!content) return NextResponse.json({ error: 'empty_content' }, { status: 400 })
+  if (content.length > 2000) return NextResponse.json({ error: 'content_too_long' }, { status: 400 })
 
   try {
     await query('begin')
-    
-    // Вставляем комментарий
+
     const ins = await query<{ id: string }>(
       `insert into team_post_comments (post_id, user_id, content, parent_id)
        values ($1::uuid, $2::uuid, $3, $4::uuid)
        returning id::text`,
       [postId, uid, content, parent]
     )
-    
-    // Обновляем счетчик комментариев в посте
+
     await query(
       'update team_posts set comments_count = comments_count + 1 where id = $1::uuid',
       [postId]
     )
-    
+
+    // Вернём подготовленный объект с ролью и профилем
+    const one = await query<{
+      id: string; post_id: string; user_id: string; content: string;
+      parent_id: string | null; created_at: string; updated_at: string;
+      username: string | null; avatar_url: string | null; team_role: string | null
+    }>(
+      `
+      select
+        c.id::text,
+        c.post_id::text,
+        c.user_id::text,
+        c.content,
+        c.parent_id::text,
+        c.created_at,
+        c.updated_at,
+        p.username,
+        p.avatar_url,
+        m.role as team_role
+      from team_post_comments c
+      left join profiles p on p.id = c.user_id
+      left join translator_team_members m
+        on m.team_id = $2 and m.user_id = c.user_id
+      where c.id = $1::uuid
+      `,
+      [ins.rows[0].id, team.id]
+    )
+
     await query('commit')
-    
-    return NextResponse.json({ 
-      ok: true, 
-      id: ins.rows[0].id 
-    })
+
+    return NextResponse.json({ ok: true, item: one.rows[0] })
   } catch (e) {
     await query('rollback').catch(() => {})
     console.error('comments POST error', e)

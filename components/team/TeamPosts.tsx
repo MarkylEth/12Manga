@@ -236,13 +236,21 @@ export default function TeamPosts({
     return () => { mounted.current = false }
   }, [])
 
+  const [myProfile, setMyProfile] = useState<{ username: string|null; avatar_url: string|null } | null>(null)
+
   /* ===== роль пользователя в команде (для прав) ===== */
   useEffect(() => {
-    if (!user?.id || !teamId) { setMyRole(null); return }
-    api<{ role: string | null }>(`/api/teams/${encodeURIComponent(teamSlug)}/member-role`, { userId: user.id })
-      .then((r) => setMyRole(normalizeRole((r as any)?.role ?? null)))
-      .catch(() => setMyRole(null))
-  }, [teamId, teamSlug, user?.id])
+    if (!user?.id || !teamId) { setMyRole(null); setMyProfile(null); return }
+    api<{ role: string | null; canEdit: boolean; canPost: boolean; profile: { username: string|null; avatar_url: string|null } | null }>(
+      `/api/teams/${encodeURIComponent(teamSlug)}/member-role`,
+      { userId: user.id }
+    )
+      .then((r) => {
+        setMyRole(normalizeRole(r?.role ?? null))
+        setMyProfile(r?.profile ?? null)
+      })
+      .catch(() => { setMyRole(null); setMyProfile(null) })
+  }, [teamId, teamSlug, user?.id]) 
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1028,6 +1036,7 @@ export default function TeamPosts({
               textMuted={textMuted}
               cardBg={cardBg}
               user={user}
+              myProfile={myProfile}
               isLeader={isLeader}
               setEditingPost={setEditingPost}
               editingPost={editingPost}
@@ -1068,6 +1077,7 @@ export default function TeamPosts({
               textMuted={textMuted}
               cardBg={cardBg}
               user={user}
+              myProfile={myProfile}
               isLeader={isLeader}
               setEditingPost={setEditingPost}
               editingPost={editingPost}
@@ -1195,6 +1205,7 @@ const PostCard: React.FC<{
   textMuted: string
   cardBg: string
   user: any
+  myProfile: { username: string|null; avatar_url: string|null } | null
   isLeader: boolean
   editingPost: string | null
   setEditingPost: (id: string | null) => void
@@ -1224,7 +1235,7 @@ const PostCard: React.FC<{
   onDeleteComment: (commentId: string) => void
 }> = (props) => {
   const {
-    post, index, theme, textMain, textMuted, cardBg, user, isLeader,
+    post, index, theme, textMain, textMuted, cardBg, user, myProfile, isLeader,
     editingPost, setEditingPost, onToggleLike, onOpenComments, onDelete,
     onUpdate, onOpenImageViewer, commentsOpen, comments, commentDraft,
     commentSending, onCommentDraftChange, onSendComment, getRoleLabel,
@@ -1625,32 +1636,54 @@ const PostCard: React.FC<{
                     {/* форма ответа */}
                     {replyToId === c.id && (
                       <div className="mt-2 pl-4">
-                        <textarea
-                          className={`w-full rounded-xl border px-3 py-3 text-sm resize-none ${
-                            theme === 'light' ? 'bg-white border-slate-300' : 'bg-slate-700/50 border-slate-600'
-                          } ${textMain}`}
-                          placeholder="Ваш ответ..."
-                          value={replyDraftMap[c.id] ?? ''}
-                          onChange={e => setReplyDraftMap(prev => ({ ...prev, [c.id]: e.target.value }))}
-                          rows={3}
-                          maxLength={600}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onSendReply(c.id) }
-                          }}
-                        />
-                        <div className="mt-2 flex items-center justify-between">
-                          <div className={`text-xs ${textMuted}`}>
-                            {(replyDraftMap[c.id] ?? '').length}/600 символов
+                        <div className="flex gap-3 items-start">
+                          {/* аватар текущего пользователя */}
+                          <div className="h-7 w-7 rounded-full overflow-hidden bg-slate-200 flex-shrink-0">
+                            {myProfile?.avatar_url ? (
+                              <img
+                                src={myProfile.avatar_url}
+                                alt=""
+                                className="w-full h-full object-cover"
+                                onError={(e) => {
+                                  (e.currentTarget as HTMLImageElement).style.display = 'none'
+                                  const p = (e.currentTarget as HTMLImageElement).parentElement
+                                  if (p) p.innerHTML = '<div class="w-full h-full grid place-items-center text-[10px]">👤</div>'
+                                }}
+                              />
+                            ) : (
+                              <div className="w-full h-full grid place-items-center text-[10px]">👤</div>
+                            )}
                           </div>
-                          <SolidButton
-                            size="sm"
-                            onClick={() => onSendReply(c.id)}
-                            disabled={!((replyDraftMap[c.id] ?? '').trim())}
-                            ariaLabel="Ответить"
-                          >
-                            <Send className="w-4 h-4" />
-                            Ответить
-                          </SolidButton>
+
+                          <div className="flex-1">
+                            <textarea
+                              className={`w-full rounded-xl border px-3 py-3 text-sm resize-none ${
+                                theme === 'light' ? 'bg-white border-slate-300' : 'bg-slate-700/50 border-slate-600'
+                              } ${textMain}`}
+                              placeholder="Ваш ответ..."
+                              value={replyDraftMap[c.id] ?? ''}
+                              onChange={e => setReplyDraftMap(prev => ({ ...prev, [c.id]: e.target.value }))}
+                              rows={3}
+                              maxLength={600}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onSendReply(c.id) }
+                              }}
+                            />
+                            <div className="mt-2 flex items-center justify-between">
+                              <div className={`text-xs ${textMuted}`}>
+                                {(replyDraftMap[c.id] ?? '').length}/600 символов
+                              </div>
+                              <SolidButton
+                                size="sm"
+                                onClick={() => onSendReply(c.id)}
+                                disabled={!((replyDraftMap[c.id] ?? '').trim())}
+                                ariaLabel="Ответить"
+                              >
+                                <Send className="w-4 h-4" />
+                                Ответить
+                              </SolidButton>
+                            </div>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1659,8 +1692,22 @@ const PostCard: React.FC<{
 
                 {/* форма нового комментария */}
                 <div className="flex gap-3 pt-2 border-t border-slate-200/50 dark:border-slate-600/50">
+                  {/* аватар текущего пользователя в форме комментария */}
                   <div className="h-8 w-8 rounded-full overflow-hidden bg-slate-200 flex-shrink-0">
-                    <div className="w-full h-full grid place-items-center text-xs">👤</div>
+                    {myProfile?.avatar_url ? (
+                      <img
+                        src={myProfile.avatar_url}
+                        alt=""
+                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                          (e.currentTarget as HTMLImageElement).style.display = 'none'
+                          const parent = (e.currentTarget as HTMLImageElement).parentElement
+                          if (parent) parent.innerHTML = '<div class="w-full h-full grid place-items-center text-xs">👤</div>'
+                        }}
+                      />
+                    ) : (
+                      <div className="w-full h-full grid place-items-center text-xs">👤</div>
+                    )}
                   </div>
 
                   <div className="flex-1">
