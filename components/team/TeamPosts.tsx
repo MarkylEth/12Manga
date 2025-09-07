@@ -11,7 +11,12 @@ import { useAuth } from '@/lib/auth/context'
 import { useTheme } from '@/lib/theme/context'
 
 /* ===================== Типы ===================== */
-type ProfileLite = { id: string; username: string | null; avatar_url: string | null }
+type ProfileLite = {
+  id: string
+  username: string | null
+  avatar_url: string | null
+  role?: string | null
+}
 
 type Post = {
   id: string
@@ -32,7 +37,6 @@ type Post = {
 
 type PostWithMeta = Post & {
   author?: ProfileLite | null
-  author_role?: string | null
   is_liked_by_me: boolean
 }
 
@@ -108,21 +112,28 @@ function wirePost(row: any): PostWithMeta {
   const comments_count = Number(row.comments_count ?? row.commentsCount ?? 0)
   const created_at = row.created_at ?? row.createdAt ?? new Date().toISOString()
   const updated_at = row.updated_at ?? row.updatedAt ?? created_at
-  const author: ProfileLite | null =
-    row.author
-      ? { id: String(row.author.id), username: row.author.username ?? null, avatar_url: row.author.avatar ?? row.author.avatar_url ?? null }
-      : {
-          id: author_id,
-          username: row.author_username ?? row.username ?? null,
-          avatar_url: row.author_avatar_url ?? row.avatar_url ?? null,
-        }
-  const author_role = row.author_role ?? null
+
+  const author: ProfileLite | null = row.author
+    ? {
+        id: String(row.author.id),
+        username: row.author.username ?? null,
+        avatar_url: row.author.avatar ?? row.author.avatar_url ?? null,
+        role: row.author.role ?? row.author_role ?? null,      // ← добавили
+      }
+    : {
+        id: author_id,
+        username: row.author_username ?? row.username ?? null,
+        avatar_url: row.author_avatar_url ?? row.avatar_url ?? null,
+        role: row.author_role ?? null,                          // ← добавили
+      }
+
   const is_liked_by_me = Boolean(row.is_liked_by_me ?? row.likedByViewer ?? row.viewer_liked ?? false)
 
   return {
     id, team_id, author_id, title, body, images, featured_image, post_type,
     is_published, is_pinned, likes_count, comments_count, created_at, updated_at,
-    author, author_role, is_liked_by_me
+    author,                      // ← роль теперь внутри author
+    is_liked_by_me
   }
 }
 
@@ -147,20 +158,27 @@ async function api<T>(
   options: RequestInit & { userId?: string | null } = {}
 ): Promise<T> {
   const { userId, headers, ...rest } = options
+  const allowDevHeader = process.env.NODE_ENV !== 'production'
+
   const res = await fetch(url, {
     credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
-      ...(userId ? { 'x-user-id': userId } : {}), // dev-хедер — если включён на бекенде
+      ...(userId && allowDevHeader ? { 'x-user-id': userId } : {}),
       ...(headers || {})
     },
     ...rest
   })
+
   if (!res.ok) {
     const msg = await res.text().catch(() => '')
     throw new Error(msg || `${res.status} ${res.statusText}`)
   }
-  return res.json() as Promise<T>
+
+  if (res.status === 204) return null as unknown as T
+  const ct = res.headers.get('content-type') || ''
+  if (ct.includes('application/json')) return (await res.json()) as T
+  return (await res.text()) as unknown as T
 }
 
 /* ===================== Компонент ===================== */
@@ -269,6 +287,8 @@ export default function TeamPosts({
         { userId: user?.id || null }
       )
       const items = Array.isArray(data.items) ? data.items.map(wirePost) : []
+      items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      if (mounted.current) setPosts(items)
       if (mounted.current) setPosts(items)
     } catch (e) {
       console.error('[TeamPosts] load error', e)
@@ -277,6 +297,7 @@ export default function TeamPosts({
       if (!soft) setLoading(false)
     }
   }
+  
 
   useEffect(() => {
     if (initialLoading || !teamSlug) return
@@ -408,21 +429,23 @@ export default function TeamPosts({
       const isOwn = target.author_id === user?.id
   
       if (isLeaderHere) {
-        // Лидер: можно удалять только последние 4 незакреплённых
-        const nonPinned = posts.filter(p => !p.is_pinned)
-        const idx = nonPinned.findIndex(p => p.id === postId)
+        const nonPinnedSorted = posts
+          .filter(p => !p.is_pinned)
+          .slice()
+          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      
+        const idx = nonPinnedSorted.findIndex(p => p.id === postId)
         const isInTop4 = idx > -1 && idx < 4
         if (!isInTop4) {
           alert('Лидер может удалять только последние 4 поста в ленте')
           return
         }
       } else {
-        // Не лидер: только свои
         if (!isOwn) {
           alert('Удалять можно только свои посты')
           return
         }
-      }
+      }      
   
       // показать спиннер на кнопке модалки
       setConfirmDelete(prev => prev ? { ...prev, busy: true } : prev)
@@ -750,16 +773,23 @@ export default function TeamPosts({
       ? 'bg-gray-100 text-gray-600 border-gray-200 border font-medium'
       : 'bg-gray-700/30 text-gray-300 border-gray-600/50 border font-medium'
   }
-  const formatText = (text: string) => {
-    const cleaned = text
-      .replace(/\n{3,}/g, '\n\n')
-      .replace(/[ \t]{2,}/g, ' ')
+  const escapeHtml = (s: string) =>
+    s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
   
+  const formatText = (text: string) => {
+    const cleaned = escapeHtml(
+      text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ')
+    )
     return cleaned
       .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
       .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>')
       .replace(/__(.*?)__/g, '<u>$1</u>')
-  }
+  }  
 
   /* ===== разбиение / пагинация ===== */
   const pinned = posts.find(p => p.is_pinned)
@@ -1260,21 +1290,18 @@ const PostCard: React.FC<{
   // Коллапс длинного текста
   const [expanded, setExpanded] = useState(false)
   const contentRef = useRef<HTMLDivElement | null>(null)
-  const [needsClamp, setNeedsClamp] = useState(false) // показывать градиент/кнопку только если реально обрезано
+  const [needsClamp, setNeedsClamp] = useState(false)
 
   useEffect(() => {
     if (!contentRef.current) return
     const el = contentRef.current
-    // даём браузеру дорисовать DOM, затем меряем
     const rAF = requestAnimationFrame(() => {
-      // el.clientHeight — видимая высота, el.scrollHeight — полная
-      setNeedsClamp(el.scrollHeight - el.clientHeight > 4) // небольшой зазор
+      setNeedsClamp(el.scrollHeight - el.clientHeight > 4)
     })
     return () => cancelAnimationFrame(rAF)
   }, [post.body, post.title, expanded, theme])
 
   useEffect(() => {
-    // пересчитываем при ресайзе окна
     const onResize = () => {
       if (!contentRef.current) return
       const el = contentRef.current
@@ -1295,9 +1322,7 @@ const PostCard: React.FC<{
         title: editData.title.trim() || null,
         body: editData.body.trim()
       })
-      // onUpdate внутри родителя сам закроет режим редактирования (setEditingPost(null))
     } catch (e) {
-      // На всякий случай — если onUpdate бросит ошибку (у вас уже есть alert в родителе)
       console.error(e)
     } finally {
       setSavingEdit(false)
@@ -1345,9 +1370,9 @@ const PostCard: React.FC<{
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <div className={`font-medium ${textMain} truncate`}>{post.author?.username || 'Аноним'}</div>
-                {post.author_role && (
-                  <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${getRoleColor(post.author_role)}`}>
-                    {getRoleLabel(post.author_role)}
+                {post.author?.role && (
+                  <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${getRoleColor(post.author?.role ?? null)}`}>
+                    {getRoleLabel(post.author?.role ?? null)}
                   </span>
                 )}
                 {post.is_pinned && (

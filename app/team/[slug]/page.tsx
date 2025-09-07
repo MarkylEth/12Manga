@@ -33,6 +33,8 @@ import {
   Activity
 } from 'lucide-react'
 
+const DEV = process.env.NODE_ENV !== 'production'
+
 /* ========= DB types ========= */
 type Team = Tables<'translator_teams'>
 type TeamMember = Tables<'translator_team_members'>
@@ -180,7 +182,6 @@ export default function TeamPage(): JSX.Element {
   const [members, setMembers] = useState<MemberWithProfile[]>([])
   const [isEditOpen, setIsEditOpen] = useState(false)
   const [isFollowing, setIsFollowing] = useState(false)
-  const [myTeamRole, setMyTeamRole] = useState<string | null>(null)
   const [followPending, setFollowPending] = useState(false)
 
   const [activeTab, setActiveTab] = useState<'overview' | 'titles' | 'posts'>('overview')
@@ -193,28 +194,9 @@ export default function TeamPage(): JSX.Element {
   // для всплывашки "Ссылка скопирована"
   const [copied, setCopied] = useState(false)
 
-  // ref для актуального состояния в обработчиках
-  const teamRef = useRef<Team | null>(null)
-  useEffect(() => {
-    teamRef.current = team as any
-  }, [team])
-
   // лок против конкурирующих загрузок
   const loadLockRef = useRef(false)
-
-  // --- Моя роль в команде (лидер/участник) по данным сервера ---
-  useEffect(() => {
-    if (!user?.id || !slug) { setMyTeamRole(null); return }
-    fetch(`/api/teams/${encodeURIComponent(slug)}/member-role?user=${encodeURIComponent(user.id)}`, {
-      headers: { 'x-user-id': user.id },
-      cache: 'no-store',
-    })
-      .then(r => r.ok ? r.json() : null)
-      .then(j => setMyTeamRole(normalizeRole(j?.role ?? null)))
-      .catch(() => setMyTeamRole(null))
-  }, [slug, user?.id])
-
-  // --- Лёгкий рефетч на фокус вкладки (без перезагрузки тайтлов) ---
+  const abortRef = useRef<AbortController | null>(null)
   const lastFocusRefresh = useRef(0)
 
   const refreshOnFocus = async () => {
@@ -224,103 +206,157 @@ export default function TeamPage(): JSX.Element {
     lastFocusRefresh.current = now
 
     try {
-      const r = await fetch(`/api/teams/${encodeURIComponent(slug)}`, { cache: 'no-store' })
+      const ac = new AbortController()
+      const r = await fetch(`/api/teams/${encodeURIComponent(slug)}`, {
+        cache: 'no-store',
+        signal: ac.signal,
+      })
       if (!r.ok) return
       const fresh = await r.json()
-      setTeam(prev => prev ? { ...(prev as any), followers_count: fresh.followers_count ?? prev.followers_count } : prev)
+      setTeam(prev => prev ? { ...(prev as any), followers_count: fresh.followers_count ?? (prev as any).followers_count } : prev)
       setIsFollowing(Boolean(fresh.i_follow))
     } catch (e) {
-      console.warn('refreshOnFocus error', e)
+      if (DEV) console.warn('refreshOnFocus error', e)
     }
   }
 
   // единый загрузчик данных команды
   const loadTeam = async (isFirst: boolean, withTitles: boolean = true) => {
+    // 1) отменяем предыдущую пачку запросов, если она ещё идёт
+    abortRef.current?.abort()
+  
+    // 2) создаём новый контроллер для текущего запуска
+    const ac = new AbortController()
+    abortRef.current = ac
+    const { signal } = ac
+  
     if (loadLockRef.current) return
     loadLockRef.current = true
-
+  
     isFirst ? setInitialLoading(true) : setRefreshing(true)
     if (withTitles) setLoadingTitles(true)
-
-      console.log('Loading team:', slug)
-
+  
+    if (DEV) console.log('Loading team:', slug)
+  
     try {
-      // 1) Команда — NEON API
-      const rTeam = await fetch(`/api/teams/${encodeURIComponent(slug)}`, { cache: 'no-store' })
+      // === 1) Команда ===
+      const rTeam = await fetch(`/api/teams/${encodeURIComponent(slug)}`, {
+        cache: 'no-store',
+        signal,
+      })
       if (!rTeam.ok) {
+        if (signal.aborted) return
         setTeam(null)
         setMembers([])
         setTitles([])
         return
       }
       const t = await rTeam.json()
-      console.log('Team data:', t)
+      if (signal.aborted) return
+      if (DEV) console.log('Team data:', t)
       setTeam(t)
       setIsFollowing(Boolean(t.i_follow))
-
-      // 2) Тайтлы команды — NEON API каталога
-      if (withTitles && t?.id) {
+  
+      // === 2) Тайтлы ===
+      if (withTitles && t?.id && !signal.aborted) {
         try {
-          const r2 = await fetch(`/api/catalog?teamId=${t.id}`, { cache: 'no-store' })
+          const r2 = await fetch(`/api/catalog?teamId=${t.id}`, {
+            cache: 'no-store',
+            signal,
+          })
+          if (signal.aborted) return
           if (r2.ok) {
             const j2 = await r2.json()
-            const arr: any[] = Array.isArray(j2?.items) ? j2.items : Array.isArray(j2?.data) ? j2.data : []
+            if (signal.aborted) return
+            const arr: any[] = Array.isArray(j2?.items)
+              ? j2.items
+              : Array.isArray(j2?.data)
+              ? j2.data
+              : []
             setTitles(arr.map(mapTitleRow))
           } else {
             setTitles([])
           }
         } catch {
-          setTitles([])
+          if (!signal.aborted) setTitles([])
         }
       }
+  
+      // === 3) Участники ===
+      if (t?.id && !signal.aborted) {
+        void (async () => {
+          const membersAC = new AbortController()
+          const timeoutId = setTimeout(() => membersAC.abort('timeout'), 8000)
 
-      // 3) Участники — правильный API endpoint
-      if (t?.id) {
-        try {
-          console.log('Loading members for team:', t.id, 'slug:', slug)
-          const rMem = await fetch(`/api/teams/${encodeURIComponent(slug)}/members`, { 
-            cache: 'no-store',
-            headers: {
-              'Content-Type': 'application/json',
+          try {
+            if (DEV) console.log('Loading members for team:', t.id, 'slug:', slug)
+            const rMem = await fetch(
+              `/api/teams/${encodeURIComponent(slug)}/members`,
+              {
+                cache: 'no-store',
+                signal: membersAC.signal,
+              }
+            )
+
+            if (!rMem.ok) {
+              const errorText = await rMem.text().catch(() => '')
+              throw new Error(`HTTP ${rMem.status} ${errorText}`)
             }
-          })
-          console.log('Members API response status:', rMem.status)
-          if (rMem.ok) {
+
             const jm = await rMem.json()
-            console.log('Members response:', jm)
             const items = Array.isArray(jm?.items) ? jm.items : []
-            console.log('Setting members:', items)
-            setMembers(items as MemberWithProfile[])
-          } else {
-            const errorText = await rMem.text()
-            console.error('Failed to fetch members:', rMem.status, errorText)
-            setMembers([])
+
+            // обновляем состояние только если внешний loadTeam ещё актуален
+            if (!signal.aborted) {
+              setMembers(items as MemberWithProfile[])
+            }
+            if (DEV) console.log('Members loaded:', items.length)
+          } catch (e) {
+            if (!signal.aborted) {
+              if (DEV) console.warn('members fetch failed:', e)
+              setMembers([])
+            }
+          } finally {
+            clearTimeout(timeoutId)
           }
-        } catch (e) {
-          console.error('Error fetching members:', e)
-          setMembers([])
-        }
-      } else {
-        console.log('No team ID, clearing members')
+        })()
+      } else if (!t?.id && !signal.aborted) {
+        if (DEV) console.log('No team ID, clearing members')
         setMembers([])
       }
-    } catch (e) {
-      console.error('Error loading team:', e)
-      setTeam(null)
-      setMembers([])
-      setTitles([])
+          } catch (e: any) {
+      // если отменили — тихо выходим
+      if (e?.name !== 'AbortError') {
+        if (DEV) console.error('Error loading team:', e)
+        setTeam(null)
+        setMembers([])
+        setTitles([])
+      }
     } finally {
-      if (withTitles) setLoadingTitles(false)
-      isFirst ? setInitialLoading(false) : setRefreshing(false)
+      // если запросы отменили — не трогаем спиннеры/флаги
+      if (!signal.aborted) {
+        if (withTitles) setLoadingTitles(false)
+        isFirst ? setInitialLoading(false) : setRefreshing(false)
+      }
       loadLockRef.current = false
+  
+      // если это всё ещё актуальный контроллер — очищаем ссылку
+      if (abortRef.current === ac) abortRef.current = null
     }
-  }
+  }  
+  
+  useEffect(() => {
+    return () => {
+      // уходим со страницы — отменяем все висящие запросы
+      abortRef.current?.abort()
+    }
+  }, [])  
 
   // первичная загрузка + refresh на фокус
   useEffect(() => {
-    if (!slug) {
-      setInitialLoading(false);
-      return;
+    if (!slug) { 
+      setInitialLoading(false); 
+      return; 
     }
     void loadTeam(true, true);
 
@@ -331,13 +367,13 @@ export default function TeamPage(): JSX.Element {
     };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
-  }, [slug]);
+  }, [slug])
 
   // актуализация подписки по появлению user/команды — через наш API
   useEffect(() => {
     if (!team) return
     void refreshOnFocus()
-  }, [user?.id, team?.id])
+  }, [user?.id]) // зависимость по team?.id можно убрать  
 
   const toggleFollow = async () => {
     if (!user?.id || !team || followPending) return
@@ -359,7 +395,7 @@ export default function TeamPage(): JSX.Element {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-id': user.id, // важно: пробрасываем viewerId для route-guards
+          ...(DEV && user?.id ? { 'x-user-id': user.id } : {}),
         },
         body: JSON.stringify({ follow: !wasFollowing }),
       })
@@ -368,7 +404,7 @@ export default function TeamPage(): JSX.Element {
       setIsFollowing(Boolean(j.i_follow ?? !wasFollowing))
       setTeam(prev => prev ? { ...(prev as any), followers_count: j.followers_count ?? prevCount } : prev)
     } catch (e) {
-      console.error('toggleFollow failed', e)
+      if (DEV) console.error('toggleFollow failed', e)
       // Откат
       setIsFollowing(wasFollowing)
       setTeam(prev => prev ? { ...(prev as any), followers_count: prevCount } : prev)
@@ -393,23 +429,26 @@ export default function TeamPage(): JSX.Element {
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch (e) {
-      console.error('copy link failed', e)
+      if (DEV) console.error('copy link failed', e)
     }
   }
+
+  // моя роль в команде по данным участников
+  const myRole = useMemo(() => {
+    if (!user?.id) return null
+    const rec = members.find(m => m.user_id === user.id)
+    return normalizeRole(rec?.role)
+  }, [members, user?.id])
+
   // сервер-согласованный расчёт прав на редактирование
   const canEdit = useMemo(() => {
     if (!user) return false
-
-    // Админ берётся из profiles.role (а НЕ из user.user_metadata)
     const isAdmin = String(profile?.role || '').toLowerCase() === 'admin'
     if (isAdmin) return true
-
-    // Лидер — создатель команды ИЛИ роль leader с сервера
     const isCreator = (team as any)?.created_by === user.id
-    const isLeader  = normalizeRole(myTeamRole) === 'leader'
-
+    const isLeader  = myRole === 'leader'
     return isCreator || isLeader
-  }, [user?.id, profile?.role, myTeamRole, (team as any)?.created_by])
+  }, [user?.id, profile?.role, myRole, (team as any)?.created_by])
 
   const bgClass =
     theme === 'light' ? 'bg-gray-50' : 'bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900'
@@ -686,68 +725,67 @@ export default function TeamPage(): JSX.Element {
             >
               {/* Левая колонка */}
               <div className="space-y-6">
-              <Section>
-                <SectionTitle icon={<UsersIcon className="w-5 h-5" />}>О команде</SectionTitle>
-                {team.bio?.trim() && (
-                  <AboutCollapser text={team.bio} theme={theme} collapsedHeight={220} />
-                )}
+                <Section>
+                  <SectionTitle icon={<UsersIcon className="w-5 h-5" />}>О команде</SectionTitle>
+                  {team.bio?.trim() && (
+                    <AboutCollapser text={team.bio} theme={theme} collapsedHeight={220} />
+                  )}
 
-                {/* УСЛОВНОЕ ОТОБРАЖЕНИЕ: показываем "Что переводят" только если есть теги */}
-                {(Array.isArray(team.tags) && team.tags.length > 0) && (
-                  <>
-                    <SectionTitle>Что переводят</SectionTitle>
-                    <div className="mb-4 flex flex-wrap gap-2">
-                      {(showAllTags ? team.tags : team.tags.slice(0, 6)).map((t, i) => (
-                        <motion.span
-                          key={`tag-${i}`}
-                          initial={{ opacity: 0, scale: 0.8 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          transition={{ delay: i * 0.05 }}
-                          className={`rounded-full px-3 py-1.5 text-[13px] font-medium transition-colors ${
-                            theme === 'light'
-                              ? 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                              : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                          }`}
-                        >
-                          {t}
-                        </motion.span>
-                      ))}
+                  {(Array.isArray(team.tags) && team.tags.length > 0) && (
+                    <>
+                      <SectionTitle>Что переводят</SectionTitle>
+                      <div className="mb-4 flex flex-wrap gap-2">
+                        {(showAllTags ? team.tags : team.tags.slice(0, 6)).map((t, i) => (
+                          <motion.span
+                            key={`tag-${i}`}
+                            initial={{ opacity: 0, scale: 0.8 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            transition={{ delay: i * 0.05 }}
+                            className={`rounded-full px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                              theme === 'light'
+                                ? 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            }`}
+                          >
+                            {t}
+                          </motion.span>
+                        ))}
 
-                      {team.tags.length > 6 && !showAllTags && (
-                        <button
-                          onClick={() => setShowAllTags(true)}
-                          className={`rounded-full px-3 py-1.5 text-[13px] font-medium transition-colors ${
-                            theme === 'light'
-                              ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                              : 'bg-blue-600/20 text-blue-400 hover:bg-blue-600/30'
-                          }`}
-                        >
-                          +{team.tags.length - 6} еще
-                        </button>
-                      )}
-                    </div>
-                  </>
-                )}
+                        {team.tags.length > 6 && !showAllTags && (
+                          <button
+                            onClick={() => setShowAllTags(true)}
+                            className={`rounded-full px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                              theme === 'light'
+                                ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                                : 'bg-blue-600/20 text-blue-400 hover:bg-blue-600/30'
+                            }`}
+                          >
+                            +{team.tags.length - 6} еще
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
 
-                <SectionTitle className="mt-2">Направления перевода</SectionTitle>
-                <div className="mb-4 flex flex-wrap gap-2">
-                  {(team.langs?.length ? Array.from(new Set(team.langs)) : ['EN→RU']).map((lng, i) => (
-                    <motion.span
-                      key={`lang-${i}`}
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ delay: i * 0.05 + 0.2 }}
-                      className={`rounded-full px-3 py-1.5 text-[13px] font-medium ${
-                        theme === 'light'
-                          ? 'bg-[#e3f2fd] text-[#1976D2]'
-                          : 'bg-blue-600/20 text-blue-400 border border-blue-600/30'
-                      }`}
-                    >
-                      {lng}
-                    </motion.span>
-                  ))}
-                </div>
-              </Section>
+                  <SectionTitle className="mt-2">Направления перевода</SectionTitle>
+                  <div className="mb-4 flex flex-wrap gap-2">
+                    {(team.langs?.length ? Array.from(new Set(team.langs)) : ['EN→RU']).map((lng, i) => (
+                      <motion.span
+                        key={`lang-${i}`}
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        transition={{ delay: i * 0.05 + 0.2 }}
+                        className={`rounded-full px-3 py-1.5 text-[13px] font-medium ${
+                          theme === 'light'
+                            ? 'bg-[#e3f2fd] text-[#1976D2]'
+                            : 'bg-blue-600/20 text-blue-400 border border-blue-600/30'
+                        }`}
+                      >
+                        {lng}
+                      </motion.span>
+                    ))}
+                  </div>
+                </Section>
 
                 {/* Статистика */}
                 <Section>
@@ -808,17 +846,15 @@ export default function TeamPage(): JSX.Element {
                       </SectionTitle>
                     </div>
 
-                    {/* ИСПРАВЛЕННАЯ СЕТКА - убираем перекрытие */}
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3 gap-4">
                       {(showAllMembers ? members : members.slice(0, 12)).map((m, idx) => {
-                        console.log('Rendering member:', idx, m)
                         const username = m.profile?.username || ''
                         const profileHref = username ? `/profile/${username}` : `/profile/${m.user_id}`
                         const label = roleLabel(m.role)
 
                         return (
                           <motion.a
-                            key={`member-${m.user_id}-${idx}`} // уникальный ключ
+                            key={`member-${m.user_id}`} // стабильный ключ
                             href={profileHref}
                             initial={{ opacity: 0, scale: 0.8 }}
                             animate={{ opacity: 1, scale: 1 }}
@@ -826,7 +862,7 @@ export default function TeamPage(): JSX.Element {
                             whileHover={{ scale: 1.05, y: -5 }}
                             className="flex flex-col items-center text-center group cursor-pointer p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700/30 transition-all"
                           >
-                            {/* Аватар с фиксированными размерами */}
+                            {/* Аватар */}
                             <div
                               className={`w-16 h-16 overflow-hidden rounded-xl mb-2 ring-2 transition-all group-hover:ring-4 flex-shrink-0 ${
                                 theme === 'light'
@@ -1042,13 +1078,13 @@ export default function TeamPage(): JSX.Element {
 
                           <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
                             <div className="absolute bottom-2 left-2 right-2">
-                              {t.rating && (
+                              {Number.isFinite(Number(t.rating)) && (
                                 <div className="flex items-center gap-1 mb-1">
                                   <Star className="w-3 h-3 text-yellow-400 fill-yellow-400" />
-                                  <span className="text-xs text-white font-medium">{t.rating.toFixed(1)}</span>
+                                  <span className="text-xs text-white font-medium">{Number(t.rating).toFixed(1)}</span>
                                 </div>
                               )}
-                              {t.chapters_count && <div className="text-xs text-white">{t.chapters_count} глав</div>}
+                              {t.chapters_count ? <div className="text-xs text-white">{t.chapters_count} глав</div> : null}
                             </div>
                           </div>
 
@@ -1098,7 +1134,7 @@ export default function TeamPage(): JSX.Element {
                 teamId={(team as any).id}
                 canPost={(() => {
                   const m = members.find(m => m.user_id === user?.id)
-                  const isLead = ['lead','leader','owner'].includes(String(m?.role))
+                  const isLead = ['lead','leader','owner'].includes(String(m?.role).toLowerCase())
                   const isAdmin = String(profile?.role).toLowerCase() === 'admin'
                   return !!user && (isLead || isAdmin)
                 })()}
@@ -1130,13 +1166,13 @@ export default function TeamPage(): JSX.Element {
             tags: team.tags ?? [],
             members: members.map((m) => ({
               username: m.profile?.username ?? '',
-              role: m.role && m.role !== 'member' ? m.role : 'translator'
+              role: m.role || 'translator'
             }))
           }}
           onClose={() => setIsEditOpen(false)}
           onSave={async (v) => {
             try {
-              console.log('Saving team data:', v)
+              if (DEV) console.log('Saving team data:', v)
           
               // Подготавливаем данные для отправки
               const payload: any = {
@@ -1156,28 +1192,26 @@ export default function TeamPage(): JSX.Element {
                 payload.banner_url = v.banner_url.trim()
               }
           
-              // ИСПРАВЛЕНО: всегда отправляем URL поля, даже если disabled
-              // Если enabled=false, отправляем null для очистки в БД
-              payload.discord_url = v.discord_enabled ? (v.discord_url?.trim() || null) : null
-              payload.boosty_url = v.boosty_enabled ? (v.boosty_url?.trim() || null) : null
+              // Всегда отправляем URL-поля; если выключено — чистим в БД
+              payload.discord_url  = v.discord_enabled  ? (v.discord_url?.trim()  || null) : null
+              payload.boosty_url   = v.boosty_enabled   ? (v.boosty_url?.trim()   || null) : null
               payload.telegram_url = v.telegram_enabled ? (v.telegram_url?.trim() || null) : null
-              payload.vk_url = v.vk_enabled ? (v.vk_url?.trim() || null) : null
+              payload.vk_url       = v.vk_enabled       ? (v.vk_url?.trim()       || null) : null
           
-              console.log('Final payload:', payload)
+              if (DEV) console.log('Final payload:', payload)
           
-              // Остальная логика остается без изменений...
               const rTeam = await fetch(`/api/teams/${encodeURIComponent(slug)}/edit`, {
                 method: 'PATCH',
                 headers: { 
                   'Content-Type': 'application/json',
-                  'x-user-id': user?.id || ''
+                  ...(DEV && user?.id ? { 'x-user-id': user.id } : {}),
                 },
                 body: JSON.stringify(payload),
               })
-              
+
               if (!rTeam.ok) {
                 const errorData = await rTeam.json().catch(() => ({}))
-                console.error('Team update failed:', errorData)
+                if (DEV) console.error('Team update failed:', errorData)
                 
                 let errorMessage = 'Не удалось обновить команду'
                 if (errorData.error === 'invalid_urls') {
@@ -1193,30 +1227,30 @@ export default function TeamPage(): JSX.Element {
               }
           
               const teamResult = await rTeam.json()
-              console.log('Team update result:', teamResult)
+              if (DEV) console.log('Team update result:', teamResult)
           
               // Обновляем участников (если есть изменения)
               if (v.members && v.members.length > 0) {
-                console.log('Updating members:', v.members)
+                if (DEV) console.log('Updating members:', v.members)
           
                 const rMembers = await fetch(`/api/teams/${encodeURIComponent(slug)}/members`, {
                   method: 'POST',
                   headers: { 
                     'Content-Type': 'application/json',
-                    'x-user-id': user?.id || ''
+                    ...(DEV && user?.id ? { 'x-user-id': user.id } : {}),
                   },
                   body: JSON.stringify({ members: v.members }),
                 })
           
                 if (rMembers.ok) {
                   const membersResult = await rMembers.json()
-                  console.log('Members update result:', membersResult)
+                  if (DEV) console.log('Members update result:', membersResult)
                   
                   if (Array.isArray(membersResult?.items)) {
                     setMembers(membersResult.items)
                   }
                 } else {
-                  console.warn('Members update failed, but team data was saved')
+                  if (DEV) console.warn('Members update failed, but team data was saved')
                 }
               }
           
@@ -1229,11 +1263,11 @@ export default function TeamPage(): JSX.Element {
               } : prevTeam)
               
               setIsEditOpen(false)
-              console.log('Команда успешно обновлена!')
+              if (DEV) console.log('Команда успешно обновлена!')
               
             } catch (e) {
               const msg = e instanceof Error ? e.message : typeof e === 'string' ? e : 'Неизвестная ошибка'
-              console.error('[Edit save]', e)
+              if (DEV) console.error('[Edit save]', e)
               alert(`Ошибка: ${msg}`)
             }
           }}
@@ -1533,8 +1567,8 @@ const EditModal: React.FC<EditModalProps> = ({ initial, onClose, onSave }) => {
                         }))
                       }}
                     >
-                      {['leader','editor','translator','typesetter'].map(r => (
-                        <option key={r} value={r}>{roleLabel(r)}</option>
+                      {['leader','editor','translator','typesetter','member'].map(r => (
+                        <option key={r} value={r}>{roleLabel(r) ?? r}</option>
                       ))}
                     </select>
                     <button
@@ -1564,18 +1598,18 @@ const EditModal: React.FC<EditModalProps> = ({ initial, onClose, onSave }) => {
             </div>
 
             <div className="flex items-center justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={() => !saving && onClose()}
-              className={[
-                "rounded-2xl border px-4 py-2.5 text-[14px] transition-colors",
-                theme === "light"
-                  ? "border-slate-200 text-slate-700 hover:bg-slate-50"
-                  : "border-slate-600 text-slate-200 hover:bg-slate-700/40"
-              ].join(" ")}
-            >
-              Отмена
-            </button>
+              <button
+                type="button"
+                onClick={() => !saving && onClose()}
+                className={[
+                  "rounded-2xl border px-4 py-2.5 text-[14px] transition-colors",
+                  theme === "light"
+                    ? "border-slate-200 text-slate-700 hover:bg-slate-50"
+                    : "border-slate-600 text-slate-200 hover:bg-slate-700/40"
+                ].join(" ")}
+              >
+                Отмена
+              </button>
               <button
                 type="submit"
                 disabled={saving}
@@ -1672,17 +1706,16 @@ function roleLabel(role?: string | null) {
   }
 }
 
-// НОВАЯ ФУНКЦИЯ: цвета для ролей (спокойные, не яркие)
 function getRoleColor(role?: string | null) {
   const r = String(role || '').toLowerCase()
   switch (r) {
     case 'lead':
-    case 'leader':      return 'bg-amber-100 text-amber-700 border-amber-200' // золотистый
-    case 'editor':      return 'bg-blue-100 text-blue-700 border-blue-200'    // голубой
-    case 'translator':  return 'bg-green-100 text-green-700 border-green-200' // зеленый
-    case 'typesetter':  return 'bg-purple-100 text-purple-700 border-purple-200' // фиолетовый
-    case 'member':      return 'bg-gray-100 text-gray-600 border-gray-200'    // серый
-    default:            return 'bg-slate-100 text-slate-600 border-slate-200' // дефолт
+    case 'leader':      return 'bg-amber-100 text-amber-700 border-amber-200'
+    case 'editor':      return 'bg-blue-100 text-blue-700 border-blue-200'
+    case 'translator':  return 'bg-green-100 text-green-700 border-green-200'
+    case 'typesetter':  return 'bg-purple-100 text-purple-700 border-purple-200'
+    case 'member':      return 'bg-gray-100 text-gray-600 border-gray-200'
+    default:            return 'bg-slate-100 text-slate-600 border-slate-200'
   }
 }
 
