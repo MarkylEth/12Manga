@@ -47,8 +47,6 @@ export { pool };
 
 /**
  * Помощник для параметризованных SQL как template literal.
- *
- * const rows = await sql<{ id:number }>`select id from manga where title ilike ${'%naruto%'};`;
  */
 export async function sql<T extends QueryResultRow = Record<string, unknown>>(
   strings: TemplateStringsArray,
