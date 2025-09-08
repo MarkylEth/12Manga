@@ -289,7 +289,6 @@ export default function TeamPosts({
       const items = Array.isArray(data.items) ? data.items.map(wirePost) : []
       items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       if (mounted.current) setPosts(items)
-      if (mounted.current) setPosts(items)
     } catch (e) {
       console.error('[TeamPosts] load error', e)
       if (!soft) setPosts([])

@@ -260,26 +260,36 @@ export default function TeamPage(): JSX.Element {
       // === 2) Тайтлы ===
       if (withTitles && t?.id && !signal.aborted) {
         try {
-          const r2 = await fetch(`/api/catalog?teamId=${t.id}`, {
+          const r2 = await fetch(`/api/teams/${encodeURIComponent(slug)}/titles`, {
             cache: 'no-store',
             signal,
           })
           if (signal.aborted) return
           if (r2.ok) {
             const j2 = await r2.json()
-            if (signal.aborted) return
-            const arr: any[] = Array.isArray(j2?.items)
-              ? j2.items
-              : Array.isArray(j2?.data)
-              ? j2.data
-              : []
-            setTitles(arr.map(mapTitleRow))
+            const arr: any[] = Array.isArray(j2?.items) ? j2.items : []
+            setTitles(arr.map(mapTitleRow)) // твой mapTitleRow уже подходит по полям
           } else {
             setTitles([])
           }
         } catch {
           if (!signal.aborted) setTitles([])
         }
+      }
+
+      // === 4) Статистика ===
+      if (t?.id && !signal.aborted) {
+        try {
+          const rStats = await fetch(`/api/teams/${encodeURIComponent(slug)}/stats`, {
+            cache: 'no-store',
+            signal
+          })
+          if (!signal.aborted && rStats.ok) {
+            const s = await rStats.json()
+            // аккуратно вливаем только нужные поля, не затирая остальные
+            setTeam(prev => prev ? { ...(prev as any), stats_pages: s.translated_pages, stats_inwork: s.in_work, stats_chapters: s.translated_chapters } : prev)
+          }
+        } catch {}
       }
   
       // === 3) Участники ===
@@ -791,19 +801,19 @@ export default function TeamPage(): JSX.Element {
                 <Section>
                   <SectionTitle icon={<TrendingUp className="w-5 h-5" />}>Статистика</SectionTitle>
                   <div className="grid grid-cols-2 gap-4">
-                    <div className={`${theme === 'light' ? 'bg-blue-50' : 'bg-blue-600/10'} p-4 rounded-lg`}>
-                      <div className={`text-2xl font-bold ${theme === 'light' ? 'text-blue-900' : 'text-blue-400'}`}>
-                        {formatK((team as any).stats_pages ?? 0)}
-                      </div>
-                      <div className={`text-sm ${theme === 'light' ? 'text-blue-600' : 'text-blue-300'}`}>Глав переведено</div>
+                  <div className={`${theme === 'light' ? 'bg-blue-50' : 'bg-blue-600/10'} p-4 rounded-lg`}>
+                    <div className={`text-2xl font-bold ${theme === 'light' ? 'text-blue-900' : 'text-blue-400'}`}>
+                      {formatK((team as any).stats_chapters ?? 0)}
                     </div>
-                    <div className={`${theme === 'light' ? 'bg-green-50' : 'bg-green-600/10'} p-4 rounded-lg`}>
-                      <div className={`text-2xl font-bold ${theme === 'light' ? 'text-green-900' : 'text-green-400'}`}>
-                        {formatK((team as any).stats_inwork ?? 0)}
-                      </div>
-                      <div className={`text-sm ${theme === 'light' ? 'text-green-600' : 'text-green-300'}`}>В работе</div>
-                    </div>
+                    <div className={`text-sm ${theme === 'light' ? 'text-blue-600' : 'text-blue-300'}`}>Глав переведено</div>
                   </div>
+                  <div className={`${theme === 'light' ? 'bg-green-50' : 'bg-green-600/10'} p-4 rounded-lg`}>
+                    <div className={`text-2xl font-bold ${theme === 'light' ? 'text-green-900' : 'text-green-400'}`}>
+                      {formatK((team as any).stats_inwork ?? 0)}
+                    </div>
+                    <div className={`text-sm ${theme === 'light' ? 'text-green-600' : 'text-green-300'}`}>В работе</div>
+                  </div>
+                </div>
                 </Section>
               </div>
 
